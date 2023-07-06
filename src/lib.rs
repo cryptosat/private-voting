@@ -1,11 +1,16 @@
-use std::str;
+use std::{fmt, str};
 use wasm_bindgen::prelude::*;
 use sha2::Sha256;
 use rsa::{PublicKey, RsaPrivateKey, RsaPublicKey, PaddingScheme, 
           pkcs8::EncodePublicKey, pkcs8::DecodePublicKey, pkcs8::LineEnding};
 use std::collections::HashMap;
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
+use serde::ser::{Serialize, Serializer, SerializeStruct};
+use serde::{Deserialize, Deserializer};
+use serde::de::{self, Visitor, MapAccess};
 
 #[wasm_bindgen]
+#[derive(Debug, PartialEq)]
 /// Represents a privacy-preserving ballot
 pub struct Ballot {
     k       : u32,            // k-anonymity parameter
@@ -120,6 +125,124 @@ impl Ballot {
 
 }
 
+impl Serialize for Ballot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("Ballot", 4)?;
+        state.serialize_field("k", &self.k)?;
+        state.serialize_field("privkey", &self.privkey.to_pkcs8_pem(LineEnding::default()).unwrap().as_str())?;
+        state.serialize_field("pubkey", &self.get_pubkey_pem())?;
+        state.serialize_field("votes", &self.votes)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Ballot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+    {
+        enum Field { K, PrivKey, PubKey, Votes }
+
+        impl<'de> Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Field, D::Error>
+                where
+                    D: Deserializer<'de>,
+            {
+                struct FieldVisitor;
+
+                impl<'de> Visitor<'de> for FieldVisitor {
+                    type Value = Field;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("field identifier")
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Field, E>
+                        where
+                            E: de::Error,
+                    {
+                        match value {
+                            "k" => Ok(Field::K),
+                            "privkey" => Ok(Field::PrivKey),
+                            "pubkey" => Ok(Field::PubKey),
+                            "votes" => Ok(Field::Votes),
+                            _ => Err(de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_identifier(FieldVisitor)
+            }
+        }
+
+        struct BallotVisitor;
+
+        impl<'de> Visitor<'de> for BallotVisitor {
+            type Value = Ballot;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct Ballot")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<Ballot, V::Error>
+                where
+                    V: MapAccess<'de>,
+            {
+                let mut k = None;
+                let mut privkey = None;
+                let mut pubkey = None;
+                let mut votes = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::K => {
+                            if k.is_some() {
+                                return Err(de::Error::duplicate_field("k"));
+                            }
+                            k = Some(map.next_value()?);
+                        }
+                        Field::PrivKey => {
+                            if privkey.is_some() {
+                                return Err(de::Error::duplicate_field("privkey"));
+                            }
+                            let pem_string: String = map.next_value()?;
+                            let priv_key = RsaPrivateKey::from_pkcs8_pem(&pem_string).map_err(|_| de::Error::custom("Invalid RSA Private Key"))?;
+                            privkey = Some(priv_key);
+                        }
+                        Field::PubKey => {
+                            if pubkey.is_some() {
+                                return Err(de::Error::duplicate_field("pubkey"));
+                            }
+                            let pem_string: String = map.next_value()?;
+                            let pub_key = RsaPublicKey::from_public_key_pem(&pem_string).map_err(|_| de::Error::custom("Invalid RSA Public Key"))?;
+                            pubkey = Some(pub_key);
+                        }
+                        Field::Votes => {
+                            if votes.is_some() {
+                                return Err(de::Error::duplicate_field("votes"));
+                            }
+                            votes = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let k = k.ok_or_else(|| de::Error::missing_field("k"))?;
+                let privkey = privkey.ok_or_else(|| de::Error::missing_field("privkey"))?;
+                let pubkey = pubkey.ok_or_else(|| de::Error::missing_field("pubkey"))?;
+                let votes = votes.ok_or_else(|| de::Error::missing_field("votes"))?;
+
+                Ok(Ballot { k, privkey, pubkey, votes })
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["k", "privkey", "pubkey", "votes"];
+        deserializer.deserialize_struct("Ballot", FIELDS, BallotVisitor)
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -173,5 +296,17 @@ mod tests {
         let _ballot = Ballot::new(1);
         assert!( _ballot.finalize() == "" );
     }
-    
+
+    #[test]
+    fn test_serialize_and_deserialize() {
+        let mut ballot = Ballot::new(2);
+        let encrypted_vote = encrypt_message(&ballot.get_pubkey_pem(), "vote1".to_owned());
+        ballot.vote(encrypted_vote);
+
+        let serialized = serde_json::to_string(&ballot).unwrap();
+
+        let deserialized: Ballot = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(ballot, deserialized);
+    }
 }
