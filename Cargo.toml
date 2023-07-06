@@ -16,4 +16,4 @@ sha2 = "*"
 base64 = "0.13.1"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "lib"]
