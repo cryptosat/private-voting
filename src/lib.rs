@@ -26,7 +26,7 @@ extern "C" {
     fn log(s: String);
 }
 
-#[cfg(target_arch="x86_64")]
+#[cfg(not(target_family = "wasm"))]
 fn log(s: String) {
     println!("{}", s);
 }
